@@ -417,10 +417,10 @@ impl ResponsesStreamState {
                     self.collect_citations(Some(item));
                 }
             }
-            Some(item) if item.is_object() || item.is_string() => {
-                if !self.citations.contains(item) {
-                    self.citations.push(item.clone());
-                }
+            Some(item)
+                if (item.is_object() || item.is_string()) && !self.citations.contains(item) =>
+            {
+                self.citations.push(item.clone());
             }
             _ => {}
         }
