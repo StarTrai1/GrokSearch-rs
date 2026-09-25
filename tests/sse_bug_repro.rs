@@ -710,5 +710,8 @@ async fn responses_text_follows_output_and_content_indices() {
     let parsed = parse_grok_responses(&raw).expect("ordered output parts");
 
     assert_eq!(parsed.content, "First part.\nSecond part.\nLater output.");
-    assert!(parsed.sources.is_empty(), "text ordering adds no provenance");
+    assert!(
+        parsed.sources.is_empty(),
+        "text ordering adds no provenance"
+    );
 }

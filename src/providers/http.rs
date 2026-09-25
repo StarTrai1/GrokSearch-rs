@@ -378,7 +378,10 @@ impl ResponsesStreamState {
     }
 
     fn set_text(&mut self, output_index: u64, content_index: u64, value: Option<&Value>) {
-        if let Some(text) = value.and_then(Value::as_str).filter(|text| !text.is_empty()) {
+        if let Some(text) = value
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
             self.text_parts
                 .insert((output_index, content_index), text.to_string());
         }
@@ -398,7 +401,8 @@ impl ResponsesStreamState {
             // A nonempty item snapshot replaces earlier text for that item,
             // including any old content parts absent from the new snapshot.
             if parts.iter().any(|part| has_nonempty_text(part.get("text"))) {
-                self.text_parts.retain(|(index, _), _| *index != output_index);
+                self.text_parts
+                    .retain(|(index, _), _| *index != output_index);
             }
             for (index, part) in parts.iter().enumerate() {
                 self.collect_part(part, output_index, index as u64);
@@ -591,9 +595,7 @@ fn process_sse_event(
         )));
     }
 
-    if named_completion
-        || value.get("type").and_then(Value::as_str) == Some("response.completed")
-    {
+    if named_completion || value.get("type").and_then(Value::as_str) == Some("response.completed") {
         *last_json = Some(value);
         return finish_sse_state(label, last_json, chat_metadata, responses, chat_content)
             .map(Some);
