@@ -15,4 +15,3 @@ Install the downloaded, checksum-verified binary in a versioned user-owned direc
 
 ## Parameter adjustment
 Preserve extra sources=3, inline sources=4, enrichment concurrency=4, response budget=45000, timeout=90s, cache=256. Set fallback sources=5, enrichment per-source cap=8000, standalone fetch cap=60000. The fetch cap addresses observed loss of later documentation sections; the inline cap leaves room for summaries/metadata within the fixed response budget. More fallback candidates improve the opportunity to select useful sources but do not prove higher quality.
-

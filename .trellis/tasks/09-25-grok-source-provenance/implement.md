@@ -14,4 +14,3 @@
 - [ ] Preserve red/green/release evidence and update task records; report required MCP restart and runtime-verification boundary.
 
 Rollback uses the saved original MCP command and npm package plus the configuration backup. No local Cargo, Rust installation, test runner, binary version execution or MCP smoke is authorized. Package parsing, diff review, archive listing and checksum checks are file-integrity operations only.
-

@@ -21,4 +21,3 @@ The user has already authorized fork, clone, implementation, commits, pushes, Gi
 4. Source-free/bare-link behavior remains explicitly unverified; no synthetic provenance is introduced.
 5. A fork-only Linux release is gated by checks and identifies the exact commit, run and checksum.
 6. Installed file hashes and configured command match that release. Runtime behavior against the user's gateway is not claimed as tested under the local-test prohibition.
-

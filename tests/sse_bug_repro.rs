@@ -527,7 +527,11 @@ async fn responses_sources_survive_compact_completion() {
 async fn responses_sources_survive_other_stream_endings() {
     for (name, terminal, keep_open) in [
         ("DONE marker", b"data: [DONE]\n\n".to_vec(), true),
-        ("named completion", b"event: done\ndata: {}\n\n".to_vec(), true),
+        (
+            "named completion",
+            b"event: done\ndata: {}\n\n".to_vec(),
+            true,
+        ),
         ("EOF", Vec::new(), false),
         (
             "compact response object",
@@ -577,9 +581,16 @@ async fn responses_final_text_wins_and_keeps_event_only_sources() {
     let raw = read_responses_stream(chunks, true).await.expect("SSE JSON");
     let parsed = parse_grok_responses(&raw).expect("complete final response");
 
-    assert_eq!(parsed.content, "Final answer.", "final text is authoritative");
+    assert_eq!(
+        parsed.content, "Final answer.",
+        "final text is authoritative"
+    );
     assert_streamed_sources(&parsed);
-    assert_eq!(parsed.sources.len(), 5, "repeated URLs must be deduplicated");
+    assert_eq!(
+        parsed.sources.len(),
+        5,
+        "repeated URLs must be deduplicated"
+    );
     assert_eq!(parsed.sources[0].url, "https://example.com/annotation");
     assert_eq!(parsed.sources[0].title.as_deref(), Some("Final annotation"));
     assert_eq!(parsed.sources[1].url, "https://example.com/final");
@@ -642,7 +653,10 @@ async fn responses_terminal_failure_overrides_accumulated_text_and_sources() {
             .await
             .expect_err("partial provenance cannot turn a failed response into success");
 
-        assert!(err.to_string().contains(terminal), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains(terminal),
+            "unexpected error: {err}"
+        );
         assert!(err.to_string().contains("upstream stopped"), "{err}");
     }
 }
