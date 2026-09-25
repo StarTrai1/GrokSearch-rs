@@ -9,6 +9,13 @@
 - Support the existing structured and numbered-inline citation contracts. Ordinary Markdown links and bare URLs do not establish search provenance; source-free answers retain the explicit source fallback.
 - Cover these boundaries through adapter tests and the fake SSE server in `tests/sse_bug_repro.rs`. When local execution is prohibited, run formatting, clippy, and tests in GitHub CI and record the exact SHA; static review alone is not a passing test result.
 
+
+## Live gateway source diagnosis
+
+- Correlate the same request's ingress tools, selected outbound protocol/body, upstream citations and client response before attributing missing sources to a parser. A Responses-to-Chat conversion can discard a hosted search tool before the model sees it.
+- Check actual structured citations and tool events. A gateway may report `num_sources_used=0` even when it returns valid citation objects; that counter alone cannot establish source absence.
+- Keep search candidate URLs distinct from the citations used by an answer when evaluating relevance. A larger source list is not evidence of higher answer quality.
+
 ---
 
 ## Overview
