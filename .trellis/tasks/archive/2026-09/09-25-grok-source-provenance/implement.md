@@ -8,9 +8,9 @@
 - [x] Commit/push the test-first state to the authorized fork and confirm named assertion failures in GitHub CI, not setup/format/build failures.
 - [x] Implement Responses reconstruction/adapter corrections with no local tests or builds.
 - [x] Run independent standards/spec reviews; incorporate justified findings.
-- [ ] Commit/push the fix and require all default/http CI checks on that exact SHA.
-- [ ] Tag the green SHA with fork-*; require check-gated GitHub artifact release, checksums and build metadata.
-- [ ] Download and inspect archive, compare SHA256 and commit/run identity, install at a versioned absolute path, update MCP command.
-- [ ] Preserve red/green/release evidence and update task records; report required MCP restart and runtime-verification boundary.
+- [x] Commit/push the fix and require all default/http CI checks on that exact SHA.
+- [x] Tag the green SHA with fork-*; require check-gated GitHub artifact release, checksums and build metadata.
+- [x] Download and inspect archive, compare SHA256 and commit/run identity, install at a versioned absolute path, update MCP command.
+- [x] Preserve red/green/release evidence and update task records; report required MCP restart and runtime-verification boundary.
 
 Rollback uses the saved original MCP command and npm package plus the configuration backup. No local Cargo, Rust installation, test runner, binary version execution or MCP smoke is authorized. Package parsing, diff review, archive listing and checksum checks are file-integrity operations only.
