@@ -8,9 +8,11 @@ pub fn parse_grok_responses(raw: &Value) -> Result<SearchResponse> {
     let mut text_parts = Vec::new();
     let mut sources = Vec::new();
 
-    if let Some(output_text) = raw.get("output_text").and_then(Value::as_str) {
-        push_nonempty(&mut text_parts, output_text);
-    }
+    let aggregate_text = raw
+        .get("output_text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
 
     if let Some(output) = raw.get("output").and_then(Value::as_array) {
         for item in output {
@@ -22,13 +24,24 @@ pub fn parse_grok_responses(raw: &Value) -> Result<SearchResponse> {
         collect_sources_from_value(citations, &mut sources);
     }
 
-    let content = text_parts.join("\n").trim().to_string();
+    // A gateway may return both its aggregate answer and individual chunks.
+    // Keep collecting chunk citations, but do not append their text twice.
+    let content = aggregate_text
+        .map(str::to_string)
+        .unwrap_or_else(|| text_parts.join("\n").trim().to_string());
 
     // Last-resort path: proxied / OpenAI-compatible Grok gateways often inline
     // real search citations as `[[n]](url)` Markdown in the answer text instead
     // of the structured fields above. Harvest those after the structured paths
     // so dedupe folds duplicates into the richer structured entries.
     extract_inline_bracket_citations(&content, "grok_responses", &mut sources);
+    if aggregate_text.is_some() {
+        // Display only the aggregate, but retain numbered citations that a
+        // compatible gateway leaves exclusively in its individual chunks.
+        for text in &text_parts {
+            extract_inline_bracket_citations(text, "grok_responses", &mut sources);
+        }
+    }
 
     dedupe_sources(&mut sources);
 
@@ -81,6 +94,9 @@ fn collect_one_source(item: &Value, sources: &mut Vec<Source>) {
         return;
     }
 
+    // Compatible gateways may use the nested Chat Completions annotation
+    // shape while serving Responses. Keep the flat xAI shape as well.
+    let item = item.get("url_citation").unwrap_or(item);
     let Some(url) = item
         .get("url")
         .or_else(|| item.get("uri"))

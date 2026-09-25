@@ -2,6 +2,13 @@
 
 > Code quality standards for backend development.
 
+## Responses stream provenance
+
+- Preserve structured citation and search-source metadata across compact completion, `[DONE]`, named completion, and EOF. Complete final text takes precedence; snapshots and deltas must not duplicate answer text.
+- Keep source metadata cumulative while replacing text by output/content index. A failed or incomplete terminal event remains an error even after usable text or citations arrived.
+- Support the existing structured and numbered-inline citation contracts. Ordinary Markdown links and bare URLs do not establish search provenance; source-free answers retain the explicit source fallback.
+- Cover these boundaries through adapter tests and the fake SSE server in `tests/sse_bug_repro.rs`. When local execution is prohibited, run formatting, clippy, and tests in GitHub CI and record the exact SHA; static review alone is not a passing test result.
+
 ---
 
 ## Overview

@@ -660,3 +660,55 @@ async fn responses_terminal_failure_overrides_accumulated_text_and_sources() {
         assert!(err.to_string().contains("upstream stopped"), "{err}");
     }
 }
+
+#[tokio::test]
+async fn responses_partial_snapshot_extends_with_deltas_without_repeating_text() {
+    let chunks = vec![
+        response_event(json!({
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+                "type": "output_text",
+                "text": "Snapshot ",
+                "annotations": [{"url": "https://example.com/snapshot"}]
+            }
+        })),
+        response_event(json!({
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "continued."
+        })),
+        response_event(json!({"type": "response.completed"})),
+    ];
+    let raw = read_responses_stream(chunks, true).await.expect("SSE JSON");
+    let parsed = parse_grok_responses(&raw).expect("snapshot and deltas form one answer");
+
+    assert_eq!(parsed.content, "Snapshot continued.");
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(parsed.sources[0].url, "https://example.com/snapshot");
+}
+
+#[tokio::test]
+async fn responses_text_follows_output_and_content_indices() {
+    let mut chunks = Vec::new();
+    for (output_index, content_index, text) in [
+        (3, 0, "Later output."),
+        (1, 1, "Second part."),
+        (1, 0, "First part."),
+    ] {
+        chunks.push(response_event(json!({
+            "type": "response.output_text.delta",
+            "output_index": output_index,
+            "content_index": content_index,
+            "delta": text
+        })));
+    }
+    chunks.push(response_event(json!({"type": "response.completed"})));
+    let raw = read_responses_stream(chunks, true).await.expect("SSE JSON");
+    let parsed = parse_grok_responses(&raw).expect("ordered output parts");
+
+    assert_eq!(parsed.content, "First part.\nSecond part.\nLater output.");
+    assert!(parsed.sources.is_empty(), "text ordering adds no provenance");
+}

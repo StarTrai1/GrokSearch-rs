@@ -1,5 +1,6 @@
 use reqwest::{Client, Response};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::error::{GrokSearchError, Result};
@@ -262,7 +263,7 @@ async fn send_json(
 
 async fn read_sse_json(response: &mut Response, label: &str) -> Result<Value> {
     let mut buffer = Vec::new();
-    let mut output_text = String::new();
+    let mut responses = ResponsesStreamState::default();
     let mut chat_content = String::new();
     let mut last_json = None;
     let mut chat_metadata = None;
@@ -282,7 +283,7 @@ async fn read_sse_json(response: &mut Response, label: &str) -> Result<Value> {
                 label,
                 &mut last_json,
                 &mut chat_metadata,
-                &mut output_text,
+                &mut responses,
                 &mut chat_content,
             )? {
                 return Ok(value);
@@ -297,14 +298,200 @@ async fn read_sse_json(response: &mut Response, label: &str) -> Result<Value> {
             label,
             &mut last_json,
             &mut chat_metadata,
-            &mut output_text,
+            &mut responses,
             &mut chat_content,
         )? {
             return Ok(value);
         }
     }
 
-    finish_sse_json(label, last_json, chat_metadata, output_text, chat_content)
+    finish_sse_json(label, last_json, chat_metadata, responses, chat_content)
+}
+
+/// Text snapshots replace their own part; later deltas extend that snapshot.
+/// Source metadata is cumulative because compact final responses may omit it.
+#[derive(Default)]
+struct ResponsesStreamState {
+    seen: bool,
+    text_parts: BTreeMap<(u64, u64), String>,
+    citations: Vec<Value>,
+}
+
+impl ResponsesStreamState {
+    fn collect(&mut self, value: &Value) {
+        let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if !kind.starts_with("response.")
+            && value.get("output").is_none()
+            && value.get("output_text").is_none()
+        {
+            return;
+        }
+        self.seen = true;
+        let output_index = value
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let content_index = value
+            .get("content_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        self.collect_citations(value.get("citations"));
+
+        match kind {
+            "response.output_text.delta" => {
+                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                    self.text_parts
+                        .entry((output_index, content_index))
+                        .or_default()
+                        .push_str(delta);
+                }
+            }
+            "response.output_text.done" => {
+                self.set_text(output_index, content_index, value.get("text"));
+            }
+            "response.output_text.annotation.added" => {
+                self.collect_citations(value.get("annotation"));
+            }
+            "response.content_part.added" | "response.content_part.done" => {
+                if let Some(part) = value.get("part") {
+                    self.collect_part(part, output_index, content_index);
+                }
+            }
+            "response.output_item.added" | "response.output_item.done" => {
+                if let Some(item) = value.get("item") {
+                    self.collect_item(item, output_index);
+                }
+            }
+            _ => {}
+        }
+
+        let snapshot = value.get("response").unwrap_or(value);
+        self.collect_citations(snapshot.get("citations"));
+        if let Some(output) = snapshot.get("output").and_then(Value::as_array) {
+            for (index, item) in output.iter().enumerate() {
+                self.collect_item(item, index as u64);
+            }
+        }
+        if !self.has_text() {
+            self.set_text(0, 0, snapshot.get("output_text"));
+        }
+    }
+
+    fn set_text(&mut self, output_index: u64, content_index: u64, value: Option<&Value>) {
+        if let Some(text) = value.and_then(Value::as_str).filter(|text| !text.is_empty()) {
+            self.text_parts
+                .insert((output_index, content_index), text.to_string());
+        }
+    }
+
+    fn collect_part(&mut self, part: &Value, output_index: u64, content_index: u64) {
+        self.set_text(output_index, content_index, part.get("text"));
+        self.collect_citations(part.get("annotations"));
+        self.collect_citations(part.get("citations"));
+    }
+
+    fn collect_item(&mut self, item: &Value, output_index: u64) {
+        if item.get("type").and_then(Value::as_str) == Some("web_search_call") {
+            self.collect_citations(item.pointer("/action/sources"));
+        }
+        if let Some(parts) = item.get("content").and_then(Value::as_array) {
+            // A nonempty item snapshot replaces earlier text for that item,
+            // including any old content parts absent from the new snapshot.
+            if parts.iter().any(|part| has_nonempty_text(part.get("text"))) {
+                self.text_parts.retain(|(index, _), _| *index != output_index);
+            }
+            for (index, part) in parts.iter().enumerate() {
+                self.collect_part(part, output_index, index as u64);
+            }
+        }
+    }
+
+    fn collect_citations(&mut self, value: Option<&Value>) {
+        match value {
+            Some(Value::Array(items)) => {
+                for item in items {
+                    self.collect_citations(Some(item));
+                }
+            }
+            Some(item) if item.is_object() || item.is_string() => {
+                if !self.citations.contains(item) {
+                    self.citations.push(item.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn has_text(&self) -> bool {
+        self.text_parts.values().any(|text| !text.trim().is_empty())
+    }
+
+    fn into_json(self, last_json: Option<Value>) -> Value {
+        let mut raw = last_json
+            .and_then(|value| {
+                value
+                    .get("response")
+                    .filter(|response| response.is_object())
+                    .cloned()
+                    .or_else(|| {
+                        (value.get("output").is_some()
+                            || value.get("output_text").is_some()
+                            || value.get("citations").is_some())
+                        .then_some(value)
+                    })
+            })
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        // Preserve the complete terminal answer. Only compact terminal objects
+        // need their missing text rebuilt; never append snapshots to deltas.
+        if !response_has_text(&raw) {
+            let text = self
+                .text_parts
+                .values()
+                .map(|text| text.trim())
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                raw["output_text"] = Value::String(text);
+            }
+        }
+        if !self.citations.is_empty() {
+            if let Some(object) = raw.as_object_mut() {
+                // Terminal metadata comes first, so downstream URL dedupe
+                // retains its title/order while adding event-only evidence.
+                if let Some(existing) = object.get_mut("citations") {
+                    if !existing.is_array() {
+                        *existing = Value::Array(vec![existing.take()]);
+                    }
+                }
+                append_json_array(object, "citations", &Value::Array(self.citations));
+            }
+        }
+        raw
+    }
+}
+
+fn has_nonempty_text(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn response_has_text(value: &Value) -> bool {
+    has_nonempty_text(value.get("output_text"))
+        || value
+            .get("output")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|parts| {
+                            parts.iter().any(|part| has_nonempty_text(part.get("text")))
+                        })
+                })
+            })
 }
 
 struct SseEvent {
@@ -368,7 +555,7 @@ fn process_sse_event(
     label: &str,
     last_json: &mut Option<Value>,
     chat_metadata: &mut Option<Value>,
-    output_text: &mut String,
+    responses: &mut ResponsesStreamState,
     chat_content: &mut String,
 ) -> Result<Option<Value>> {
     let event = parse_sse_event(event, label)?;
@@ -376,7 +563,7 @@ fn process_sse_event(
     let data = event.data.as_deref().map(str::trim);
 
     if named_completion && data.map(str::is_empty).unwrap_or(true) {
-        return finish_sse_state(label, last_json, chat_metadata, output_text, chat_content)
+        return finish_sse_state(label, last_json, chat_metadata, responses, chat_content)
             .map(Some);
     }
 
@@ -387,13 +574,14 @@ fn process_sse_event(
         return Ok(None);
     }
     if data == "[DONE]" {
-        return finish_sse_state(label, last_json, chat_metadata, output_text, chat_content)
+        return finish_sse_state(label, last_json, chat_metadata, responses, chat_content)
             .map(Some);
     }
 
     let value: Value = serde_json::from_str(data)
         .map_err(|err| GrokSearchError::Parse(format!("invalid {label} SSE JSON: {err}")))?;
-    collect_stream_delta(&value, output_text, chat_content);
+    responses.collect(&value);
+    collect_chat_delta(&value, chat_content);
     accumulate_chat_metadata(chat_metadata, &value);
 
     if let Some(kind) = response_terminal_error_type(&value) {
@@ -403,21 +591,11 @@ fn process_sse_event(
         )));
     }
 
-    if value.get("type").and_then(Value::as_str) == Some("response.completed") {
-        if let Some(response) = value.get("response") {
-            return Ok(Some(response.clone()));
-        }
-        if !output_text.is_empty() {
-            return Ok(Some(
-                serde_json::json!({ "output_text": output_text.clone() }),
-            ));
-        }
-        return Ok(Some(value));
-    }
-
-    if named_completion {
+    if named_completion
+        || value.get("type").and_then(Value::as_str) == Some("response.completed")
+    {
         *last_json = Some(value);
-        return finish_sse_state(label, last_json, chat_metadata, output_text, chat_content)
+        return finish_sse_state(label, last_json, chat_metadata, responses, chat_content)
             .map(Some);
     }
 
@@ -429,14 +607,14 @@ fn finish_sse_state(
     label: &str,
     last_json: &mut Option<Value>,
     chat_metadata: &mut Option<Value>,
-    output_text: &mut String,
+    responses: &mut ResponsesStreamState,
     chat_content: &mut String,
 ) -> Result<Value> {
     finish_sse_json(
         label,
         last_json.take(),
         chat_metadata.take(),
-        std::mem::take(output_text),
+        std::mem::take(responses),
         std::mem::take(chat_content),
     )
 }
@@ -569,13 +747,7 @@ fn synthesize_chat_json(
     }
 }
 
-fn collect_stream_delta(value: &Value, output_text: &mut String, chat_content: &mut String) {
-    if value.get("type").and_then(Value::as_str) == Some("response.output_text.delta") {
-        if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-            output_text.push_str(delta);
-        }
-    }
-
+fn collect_chat_delta(value: &Value, chat_content: &mut String) {
     if let Some(content) = value.pointer("/choices/0/delta/content") {
         match content {
             Value::String(text) => chat_content.push_str(text),
@@ -599,11 +771,14 @@ fn finish_sse_json(
     label: &str,
     last_json: Option<Value>,
     chat_metadata: Option<Value>,
-    output_text: String,
+    responses: ResponsesStreamState,
     chat_content: String,
 ) -> Result<Value> {
-    if !output_text.is_empty() {
-        return Ok(serde_json::json!({ "output_text": output_text }));
+    if responses.has_text()
+        || !responses.citations.is_empty()
+        || (responses.seen && chat_content.is_empty() && chat_metadata.is_none())
+    {
+        return Ok(responses.into_json(last_json));
     }
     if !chat_content.is_empty() {
         return Ok(synthesize_chat_json(last_json, chat_metadata, chat_content));

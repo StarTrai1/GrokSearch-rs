@@ -269,3 +269,52 @@ fn ordinary_links_do_not_become_search_sources() {
         );
     }
 }
+
+#[test]
+fn aggregate_output_text_wins_without_losing_chunk_citations() {
+    let raw = serde_json::json!({
+        "output_text": "First\nSecond",
+        "output": [{
+            "type": "message",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "First",
+                    "annotations": [{"url": "https://example.com/first"}]
+                },
+                {
+                    "type": "output_text",
+                    "text": "Second",
+                    "annotations": [{"url": "https://example.com/second"}]
+                }
+            ]
+        }]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("aggregate answer with chunk citations");
+
+    assert_eq!(parsed.content, "First\nSecond");
+    assert_eq!(parsed.sources.len(), 2);
+    assert_eq!(parsed.sources[0].url, "https://example.com/first");
+    assert_eq!(parsed.sources[1].url, "https://example.com/second");
+}
+
+#[test]
+fn aggregate_output_text_preserves_numbered_inline_citations_from_chunks() {
+    let raw = serde_json::json!({
+        "output_text": "Answer",
+        "output": [{
+            "type": "message",
+            "content": [{
+                "type": "output_text",
+                "text": "Answer [[1]](https://example.com/source)"
+            }]
+        }]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("aggregate answer with inline chunk citation");
+
+    assert_eq!(parsed.content, "Answer");
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(parsed.sources[0].url, "https://example.com/source");
+}
