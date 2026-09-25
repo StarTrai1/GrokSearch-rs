@@ -19,6 +19,7 @@ permissions:
 jobs:
   bump:
     name: Bump version to ${{ inputs.version }}
+    if: github.repository == 'Episkey-G/GrokSearch-rs'
     runs-on: ubuntu-latest
     steps:
       - name: Validate version

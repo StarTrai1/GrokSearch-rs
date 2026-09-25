@@ -13,6 +13,8 @@ permissions:
 jobs:
   build-release:
     name: Build ${{ matrix.asset_name }}
+    # Personal forks use fork-release.yml; upstream package names stay here.
+    if: github.repository == 'Episkey-G/GrokSearch-rs'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -267,7 +269,7 @@ jobs:
   publish-npm-platforms:
     name: Publish ${{ matrix.platform }} to npm
     needs: create-release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'Episkey-G/GrokSearch-rs' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -330,7 +332,7 @@ jobs:
   publish-npm:
     name: Publish main npm package
     needs: publish-npm-platforms
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'Episkey-G/GrokSearch-rs' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -370,7 +372,7 @@ jobs:
   sync-main:
     name: Sync version bump back to main
     needs: [publish-npm, publish-npm-platforms, create-release]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'Episkey-G/GrokSearch-rs' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main

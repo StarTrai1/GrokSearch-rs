@@ -5,8 +5,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use grok_search_rs::adapters::chat_completions_response::parse_chat_completions;
+use grok_search_rs::adapters::grok_responses_response::parse_grok_responses;
+use grok_search_rs::error::Result;
 use grok_search_rs::providers::http::{build_client, post_json};
-use serde_json::json;
+use serde_json::{json, Value};
 
 async fn spawn_sse_server(expected_stream: bool, chunks: Vec<Vec<u8>>) -> String {
     spawn_sse_server_with_mode(expected_stream, chunks, true).await
@@ -387,4 +389,260 @@ event: done\n\n"
         .collect();
     assert!(urls.contains(&"https://example.com/a"));
     assert!(urls.contains(&"https://example.com/b"));
+}
+
+fn response_event(value: Value) -> Vec<u8> {
+    format!("data: {value}\n\n").into_bytes()
+}
+
+async fn read_responses_stream(chunks: Vec<Vec<u8>>, keep_open: bool) -> Result<Value> {
+    let base = spawn_sse_server_with_mode(false, chunks, keep_open).await;
+    let client = build_client(Duration::from_secs(5));
+    post_json(
+        &client,
+        &format!("{base}/v1/responses"),
+        "dummy-key",
+        &json!({"model": "grok-4-fast", "input": "test", "stream": false}),
+        "Grok Responses",
+    )
+    .await
+}
+
+// Each source exists in a different structured event. Later snapshots omit
+// earlier citations, as a compact gateway may do; text snapshots repeat deltas.
+fn responses_provenance_chunks() -> Vec<Vec<u8>> {
+    vec![
+        response_event(json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id": "search-1", "type": "web_search_call", "status": "in_progress"}
+        })),
+        response_event(json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "id": "search-1",
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {
+                    "type": "search",
+                    "sources": [{"url": "https://example.com/tool", "title": "Tool source"}]
+                }
+            }
+        })),
+        response_event(json!({
+            "type": "response.content_part.added",
+            "output_index": 1,
+            "item_id": "message-1",
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []}
+        })),
+        response_event(json!({
+            "type": "response.output_text.delta",
+            "output_index": 1,
+            "item_id": "message-1",
+            "content_index": 0,
+            "delta": "streamed "
+        })),
+        response_event(json!({
+            "type": "response.output_text.delta",
+            "output_index": 1,
+            "item_id": "message-1",
+            "content_index": 0,
+            "delta": "answer"
+        })),
+        response_event(json!({
+            "type": "response.output_text.annotation.added",
+            "output_index": 1,
+            "item_id": "message-1",
+            "content_index": 0,
+            "annotation_index": 0,
+            "annotation": {
+                "type": "url_citation",
+                "url": "https://example.com/annotation",
+                "title": "Stream annotation"
+            }
+        })),
+        response_event(json!({
+            "type": "response.content_part.done",
+            "output_index": 1,
+            "item_id": "message-1",
+            "content_index": 0,
+            "part": {
+                "type": "output_text",
+                "text": "streamed answer",
+                "annotations": [{"url": "https://example.com/part", "title": "Part source"}]
+            }
+        })),
+        response_event(json!({
+            "type": "response.output_item.done",
+            "output_index": 1,
+            "item": {
+                "id": "message-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "streamed answer",
+                    "citations": [{"url": "https://example.com/item", "title": "Item source"}]
+                }]
+            }
+        })),
+    ]
+}
+
+fn assert_streamed_sources(parsed: &grok_search_rs::model::search::SearchResponse) {
+    for url in [
+        "https://example.com/tool",
+        "https://example.com/annotation",
+        "https://example.com/part",
+        "https://example.com/item",
+    ] {
+        assert!(
+            parsed.sources.iter().any(|source| source.url == url),
+            "structured stream source was lost: {url}; got {:?}",
+            parsed.sources
+        );
+    }
+    assert!(parsed
+        .sources
+        .iter()
+        .all(|source| source.provider == "grok_responses"));
+}
+
+#[tokio::test]
+async fn responses_sources_survive_compact_completion() {
+    let mut chunks = responses_provenance_chunks();
+    chunks.push(response_event(json!({"type": "response.completed"})));
+    let raw = read_responses_stream(chunks, true).await.expect("SSE JSON");
+    let parsed = parse_grok_responses(&raw).expect("answer with streamed sources");
+
+    assert_eq!(parsed.content, "streamed answer", "text must appear once");
+    assert_streamed_sources(&parsed);
+    assert_eq!(parsed.sources.len(), 4);
+}
+
+#[tokio::test]
+async fn responses_sources_survive_other_stream_endings() {
+    for (name, terminal, keep_open) in [
+        ("DONE marker", b"data: [DONE]\n\n".to_vec(), true),
+        ("named completion", b"event: done\ndata: {}\n\n".to_vec(), true),
+        ("EOF", Vec::new(), false),
+        (
+            "compact response object",
+            response_event(json!({
+                "type": "response.completed",
+                "response": {"id": "response-1", "status": "completed", "output": []}
+            })),
+            true,
+        ),
+    ] {
+        let mut chunks = responses_provenance_chunks();
+        chunks.push(terminal);
+        let raw = read_responses_stream(chunks, keep_open)
+            .await
+            .unwrap_or_else(|err| panic!("{name}: {err}"));
+        let parsed = parse_grok_responses(&raw)
+            .unwrap_or_else(|err| panic!("{name} lost the accumulated answer: {err}"));
+
+        assert_eq!(parsed.content, "streamed answer", "{name}");
+        assert_streamed_sources(&parsed);
+        assert_eq!(parsed.sources.len(), 4, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn responses_final_text_wins_and_keeps_event_only_sources() {
+    let mut chunks = responses_provenance_chunks();
+    chunks.push(response_event(json!({
+        "type": "response.completed",
+        "response": {
+            "id": "response-1",
+            "status": "completed",
+            "output": [{
+                "id": "message-1",
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Final answer.",
+                    "annotations": [
+                        {"url": "https://example.com/annotation", "title": "Final annotation"},
+                        {"url": "https://example.com/final", "title": "Final source"}
+                    ]
+                }]
+            }]
+        }
+    })));
+    let raw = read_responses_stream(chunks, true).await.expect("SSE JSON");
+    let parsed = parse_grok_responses(&raw).expect("complete final response");
+
+    assert_eq!(parsed.content, "Final answer.", "final text is authoritative");
+    assert_streamed_sources(&parsed);
+    assert_eq!(parsed.sources.len(), 5, "repeated URLs must be deduplicated");
+    assert_eq!(parsed.sources[0].url, "https://example.com/annotation");
+    assert_eq!(parsed.sources[0].title.as_deref(), Some("Final annotation"));
+    assert_eq!(parsed.sources[1].url, "https://example.com/final");
+}
+
+#[tokio::test]
+async fn responses_completed_parts_supply_text_without_deltas() {
+    let mut chunks = Vec::new();
+    for (content_index, text) in [(0, "First paragraph."), (1, "Second paragraph.")] {
+        chunks.push(response_event(json!({
+            "type": "response.content_part.done",
+            "output_index": 0,
+            "item_id": "message-1",
+            "content_index": content_index,
+            "part": {
+                "type": "output_text",
+                "text": text,
+                "annotations": [{"url": "https://example.com/part", "title": "Part source"}]
+            }
+        })));
+    }
+    chunks.push(response_event(json!({"type": "response.completed"})));
+    let raw = read_responses_stream(chunks, true).await.expect("SSE JSON");
+    let parsed = parse_grok_responses(&raw).expect("completed parts contain the answer");
+
+    assert_eq!(parsed.content, "First paragraph.\nSecond paragraph.");
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(parsed.sources[0].url, "https://example.com/part");
+}
+
+#[tokio::test]
+async fn responses_metadata_only_stream_retains_sources() {
+    let chunks = vec![
+        response_event(json!({
+            "type": "response.output_text.annotation.added",
+            "output_index": 0,
+            "content_index": 0,
+            "annotation_index": 0,
+            "annotation": {"type": "url_citation", "url": "https://example.com/metadata"}
+        })),
+        response_event(json!({"type": "response.completed"})),
+    ];
+    let raw = read_responses_stream(chunks, true).await.expect("SSE JSON");
+    let parsed = parse_grok_responses(&raw).expect("metadata must survive without text");
+
+    assert!(parsed.content.is_empty());
+    assert_eq!(parsed.sources.len(), 1);
+    assert_eq!(parsed.sources[0].url, "https://example.com/metadata");
+}
+
+#[tokio::test]
+async fn responses_terminal_failure_overrides_accumulated_text_and_sources() {
+    for terminal in ["response.failed", "response.incomplete"] {
+        let mut chunks = responses_provenance_chunks();
+        chunks.push(response_event(json!({
+            "type": terminal,
+            "response": {"error": {"message": "upstream stopped"}}
+        })));
+        let err = read_responses_stream(chunks, true)
+            .await
+            .expect_err("partial provenance cannot turn a failed response into success");
+
+        assert!(err.to_string().contains(terminal), "unexpected error: {err}");
+        assert!(err.to_string().contains("upstream stopped"), "{err}");
+    }
 }

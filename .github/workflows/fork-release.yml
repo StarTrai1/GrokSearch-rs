@@ -1,0 +1,166 @@
+name: Fork Release
+
+on:
+  push:
+    tags:
+      - "fork-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.repository == 'StarTrai1/GrokSearch-rs'
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Linux x86_64 stdio artifact
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout checked commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build stdio binary
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl
+
+      - name: Smoke check binary on GitHub
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tomllib
+
+          binary = Path("target/x86_64-unknown-linux-musl/release/grok-search-rs").resolve()
+          expected_version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+          version = subprocess.run(
+              [str(binary), "--version"], check=True, capture_output=True,
+              text=True, timeout=15,
+          ).stdout.strip()
+          assert version == f"grok-search-rs {expected_version}", version
+
+          request = {
+              "jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {
+                  "protocolVersion": "2024-11-05", "capabilities": {},
+                  "clientInfo": {"name": "fork-release-smoke", "version": "1"},
+              },
+          }
+          # Initialization makes no upstream request. Use no real credentials or
+          # user configuration, and keep the unused provider URL on loopback.
+          completed = subprocess.run(
+              [str(binary)], input=json.dumps(request) + "\n", check=True,
+              capture_output=True, text=True, timeout=15,
+              env={
+                  "GROK_SEARCH_API_KEY": "ci-placeholder",
+                  "GROK_SEARCH_URL": "http://127.0.0.1:9",
+                  "GROK_SEARCH_CONFIG": os.devnull,
+              },
+          )
+          response = json.loads(completed.stdout)
+          assert response["jsonrpc"] == "2.0" and response["id"] == 1, response
+          result = response["result"]
+          assert result["protocolVersion"] == "2024-11-05", response
+          assert result["serverInfo"] == {
+              "name": "grok-search-rs", "version": expected_version,
+          }, response
+          assert "tools" in result["capabilities"], response
+          print(f"{version}: version and MCP initialize checks passed")
+          PY
+
+      - name: Package binary and provenance
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p dist
+          tar -czf dist/grok-search-rs_Linux_x86_64.tar.gz \
+            -C target/x86_64-unknown-linux-musl/release grok-search-rs
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import tomllib
+
+          binary = Path("target/x86_64-unknown-linux-musl/release/grok-search-rs")
+          metadata = {
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "commit": os.environ["GITHUB_SHA"],
+              "ref": os.environ["GITHUB_REF"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "run_url": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}'
+                         f'/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+              "target": "x86_64-unknown-linux-musl",
+              "transport": "stdio",
+              "features": [],
+              "package_version": tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"],
+              "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+          }
+          Path("dist/build-info.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PY
+          cd dist
+          sha256sum grok-search-rs_Linux_x86_64.tar.gz build-info.json > SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-linux-x86_64
+          path: |
+            dist/grok-search-rs_Linux_x86_64.tar.gz
+            dist/build-info.json
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: Publish fork GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/fork-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download checked artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fork-linux-x86_64
+          path: dist
+
+      - name: Create fork release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          body: |
+            Linux x86_64 musl stdio build for this personal fork.
+
+            Source: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+            Checks and build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Verify SHA256SUMS and build-info.json before installation. The crate version is unchanged; the commit and binary checksum identify this build.
+          files: |
+            dist/grok-search-rs_Linux_x86_64.tar.gz
+            dist/build-info.json
+            dist/SHA256SUMS

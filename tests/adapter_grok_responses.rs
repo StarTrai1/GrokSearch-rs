@@ -221,3 +221,51 @@ fn inline_citations_dedupe_against_structured_sources() {
     assert!(urls.contains(&"https://openai.com/news"));
     assert!(urls.contains(&"https://openai.com/blog"));
 }
+
+#[test]
+fn parses_nested_url_citation_annotations() {
+    let raw = serde_json::json!({
+        "output": [{
+            "type": "message",
+            "content": [{
+                "type": "output_text",
+                "text": "A gateway answer.",
+                "annotations": [{
+                    "type": "url_citation",
+                    "url_citation": {
+                        "url": "https://example.com/nested",
+                        "title": "Nested source",
+                        "start_index": 0,
+                        "end_index": 16
+                    }
+                }]
+            }]
+        }]
+    });
+
+    let parsed = parse_grok_responses(&raw).expect("gateway response");
+
+    assert_eq!(parsed.content, "A gateway answer.");
+    assert_eq!(parsed.sources.len(), 1, "structured citation was lost");
+    assert_eq!(parsed.sources[0].url, "https://example.com/nested");
+    assert_eq!(parsed.sources[0].title.as_deref(), Some("Nested source"));
+    assert_eq!(parsed.sources[0].provider, "grok_responses");
+}
+
+#[test]
+fn ordinary_links_do_not_become_search_sources() {
+    for text in [
+        "An answer without citations.",
+        "See https://example.com/bare for details.",
+        "See [the documentation](https://example.com/markdown).",
+    ] {
+        let raw = serde_json::json!({"output_text": text});
+        let parsed = parse_grok_responses(&raw).expect("nonempty answer");
+
+        assert_eq!(parsed.content, text);
+        assert!(
+            parsed.sources.is_empty(),
+            "ordinary answer text must not manufacture provenance: {text}"
+        );
+    }
+}
